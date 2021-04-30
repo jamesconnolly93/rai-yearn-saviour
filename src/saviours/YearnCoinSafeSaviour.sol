@@ -267,8 +267,8 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
 
         // Redeem system coins from Compound and transfer them to the caller
         uint256 currentSystemCoinAmount = systemCoin.balanceOf(address(this));
-        cTokenCover[collateralType][safeHandler] = sub(cTokenCover[collateralType][safeHandler], cTokenAmount);
-        require(cToken.redeem(cTokenAmount) == 0, "YearnCoinSafeSaviour/cannot-redeem-ctoken");
+        yvTokenCover[collateralType][safeHandler] = sub(yvTokenCover[collateralType][safeHandler], yvTokenAmount);
+        require(yVault.withdraw(yvTokenAmount) == 0, "YearnCoinSafeSaviour/cannot-redeem-ctoken");
 
         uint256 amountTransferred = sub(systemCoin.balanceOf(address(this)), currentSystemCoinAmount);
         systemCoin.transfer(dst, amountTransferred);
@@ -293,53 +293,52 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
     *         collateralToken sent to the keeper as their payment
     */
     function saveSAFE(address keeper, bytes32 collateralType, address safeHandler) override external returns (bool, uint256, uint256) {
-        require(address(liquidationEngine) == msg.sender, "GeneralTokenReserveSafeSaviour/caller-not-liquidation-engine");
-        require(keeper != address(0), "GeneralTokenReserveSafeSaviour/null-keeper-address");
+        require(address(liquidationEngine) == msg.sender, "YearnCoinSafeSaviour/caller-not-liquidation-engine");
+        require(keeper != address(0), "YearnCoinSafeSaviour/null-keeper-address");
 
         if (both(both(collateralType == "", safeHandler == address(0)), keeper == address(liquidationEngine))) {
             return (true, uint(-1), uint(-1));
         }
 
-        require(collateralType == collateralJoin.collateralType(), "GeneralTokenReserveSafeSaviour/invalid-collateral-type");
-
         // Check that the fiat value of the keeper payout is high enough
-        require(keeperPayoutExceedsMinValue(), "GeneralTokenReserveSafeSaviour/small-keeper-payout-value");
+        require(keeperPayoutExceedsMinValue(), "YearnCoinSafeSaviour/small-keeper-payout-value");
 
-        // Check that the amount of collateral locked in the safe is bigger than the keeper's payout
-        (uint256 safeLockedCollateral,) =
-          SAFEEngineLike(collateralJoin.safeEngine()).safes(collateralJoin.collateralType(), safeHandler);
-        require(safeLockedCollateral >= mul(keeperPayout, payoutToSAFESize), "GeneralTokenReserveSafeSaviour/tiny-safe");
+        // Compute and check the validity of the amount of yvTokens used to save the SAFE
+        uint256 tokenAmountUsed = tokenAmountUsedToSave(collateralType, safeHandler);
+        require(both(tokenAmountUsed != MAX_UINT, tokenAmountUsed != 0), "YearnCoinSafeSaviour/invalid-tokens-used-to-save");
 
-        // Compute and check the validity of the amount of collateralToken used to save the SAFE
-        uint256 tokenAmountUsed = tokenAmountUsedToSave(collateralJoin.collateralType(), safeHandler);
-        require(both(tokenAmountUsed != MAX_UINT, tokenAmountUsed != 0), "GeneralTokenReserveSafeSaviour/invalid-tokens-used-to-save");
-
-        // Check that there's enough collateralToken added as to cover both the keeper's payout and the amount used to save the SAFE
-        require(collateralTokenCover[safeHandler] >= add(keeperPayout, tokenAmountUsed), "GeneralTokenReserveSafeSaviour/not-enough-cover-deposited");
+        // Check that there are enough yvTokens added to cover both the keeper's payout and the amount used to save the SAFE
+        uint256 keeperYTokenPayout = div(mul(keeperPayout, WAD), yVault.pricePerShare());
+        require(yvTokenCover[collateralType][safeHandler] >= add(keeperYTokenPayout, tokenAmountUsed), "YearnCoinSafeSaviour/not-enough-cover-deposited");
 
         // Update the remaining cover
-        collateralTokenCover[safeHandler] = sub(collateralTokenCover[safeHandler], add(keeperPayout, tokenAmountUsed));
+        yvTokenCover[collateralType][safeHandler] = sub(yvTokenCover[collateralType][safeHandler], add(keeperYTokenPayout, tokenAmountUsed));
 
-        // Mark the SAFE in the registry as just being saved
+        // Mark the SAFE in the registry as just having been saved
         saviourRegistry.markSave(collateralType, safeHandler);
 
-        // Approve collateralToken to the collateral join contract
-        collateralToken.approve(address(collateralJoin), 0);
-        collateralToken.approve(address(collateralJoin), tokenAmountUsed);
+        // Get system coins back from Yearn Vault
+        uint256 currentSystemCoinAmount = systemCoin.balanceOf(address(this));
+        require(yVault.withdraw(add(keeperYTokenPayout, tokenAmountUsed)) == 0, "YearnCoinSafeSaviour/cannot-redeem-ctoken");
+        uint256 systemCoinsToRepay = sub(sub(systemCoin.balanceOf(address(this)), currentSystemCoinAmount), keeperPayout);
 
-        // Join collateralToken in the system and add it in the saved SAFE
-        collateralJoin.join(address(this), tokenAmountUsed);
+        // Approve the coin join contract to take system coins and repay debt
+        systemCoin.approve(address(coinJoin), 0);
+        systemCoin.approve(address(coinJoin), systemCoinsToRepay);
+
+        // Join system coins in the system and repay the SAFE's debt
+        coinJoin.join(address(this), systemCoinsToRepay);
         safeEngine.modifySAFECollateralization(
-          collateralJoin.collateralType(),
+          collateralType,
           safeHandler,
-          address(this),
           address(0),
-          int256(tokenAmountUsed),
-          int256(0)
+          address(this),
+          int256(0),
+          -int256(systemCoinsToRepay)
         );
 
         // Send the fee to the keeper
-        collateralToken.transfer(keeper, keeperPayout);
+        systemCoin.transfer(keeper, keeperPayout);
 
         // Emit an event
         emit SaveSAFE(keeper, collateralType, safeHandler, tokenAmountUsed);
@@ -354,8 +353,7 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
     * @return A bool representing whether the value of keeperPayout collateralToken is >= minKeeperPayoutValue
     */
     function keeperPayoutExceedsMinValue() override public returns (bool) {
-        (address ethFSM,,) = oracleRelayer.collateralTypes(collateralJoin.collateralType());
-        (uint256 priceFeedValue, bool hasValidValue) = PriceFeedLike(PriceFeedLike(ethFSM).priceSource()).getResultWithValidity();
+        (uint256 priceFeedValue, bool hasValidValue) = systemCoinOrcl.getResultWithValidity();
 
         if (either(!hasValidValue, priceFeedValue == 0)) {
           return false;
@@ -367,8 +365,7 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
     * @notice Return the current value of the keeper payout
     */
     function getKeeperPayoutValue() override public returns (uint256) {
-        (address ethFSM,,) = oracleRelayer.collateralTypes(collateralJoin.collateralType());
-        (uint256 priceFeedValue, bool hasValidValue) = PriceFeedLike(PriceFeedLike(ethFSM).priceSource()).getResultWithValidity();
+        (uint256 priceFeedValue, bool hasValidValue) = systemCoinOrcl.getResultWithValidity();
 
         if (either(!hasValidValue, priceFeedValue == 0)) {
           return 0;
@@ -382,14 +379,15 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
     * @param safeHandler The handler of the SAFE which the function takes into account
     * @return Whether the SAFE can be saved or not
     */
-    function canSave(bytes32, address safeHandler) override external returns (bool) {
-        uint256 tokenAmountUsed = tokenAmountUsedToSave(collateralJoin.collateralType(), safeHandler);
+    function canSave(bytes32 collateralType, address safeHandler) override external returns (bool) {
+        uint256 tokenAmountUsed = tokenAmountUsedToSave(collateralType, safeHandler);
 
         if (either(tokenAmountUsed == MAX_UINT, tokenAmountUsed == 0)) {
             return false;
         }
 
-        return (collateralTokenCover[safeHandler] >= add(tokenAmountUsed, keeperPayout));
+        uint256 keeperYTokenPayout = div(mul(keeperPayout, WAD), yVault.pricePerShare());
+        return (yvTokenCover[collateralType][safeHandler] >= add(tokenAmountUsed, keeperYTokenPayout));
     }
     /*
     * @notice Calculate the amount of collateralToken used to save a SAFE and bring its CRatio to the desired level
