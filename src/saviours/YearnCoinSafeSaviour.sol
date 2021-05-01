@@ -239,16 +239,15 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
         require(safeDebt > 0, "YearnCoinSafeSaviour/safe-does-not-have-debt");
 
         // Deposit Into Yearn
-        uint256 currentYVaultBalance = yVault.balanceOf(address(this));
         systemCoin.transferFrom(msg.sender, address(this), systemCoinAmount);
-        systemCoin.approve(address(cToken), systemCoinAmount);
-        require(yVault.deposit(systemCoinAmount) == 0, "YearnCoinSafeSaviour/cannot-deposit-yVault");
+        systemCoin.approve(address(yVault), systemCoinAmount);
+        uint256 yvTokens = yVault.deposit(systemCoinAmount); // use return value to save on math operations
+        require(yvTokens > 0, "YearnCoinSafeSaviour/no-vault-tokens-returned");
 
         // Update the cToken balance used to cover the SAFE
-        yvTokenCover[collateralType][safeHandler] =
-          add(yvTokenCover[collateralType][safeHandler], sub(yVault.balanceOf(address(this)), currentYVaultBalance));
+        yvTokenCover[collateralType][safeHandler] = yvTokens;
 
-        emit Deposit(msg.sender, collateralType, safeHandler, systemCoinAmount, sub(yVault.balanceOf(address(this)), currentCTokenBalance));
+        emit Deposit(msg.sender, collateralType, safeHandler, systemCoinAmount, yvTokens);
     }
     /*
     * @notice Withdraw collateralToken from the contract and provide less cover for a SAFE
@@ -263,22 +262,21 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
 
         // Fetch the handler from the SAFE manager
         address safeHandler = safeManager.safes(safeID);
-        require(yvTokenCover[collateralType][safeHandler] >= yvTokenAmount, "YearnCoinSafeSaviour/not-enough-to-redeem");
+        require(yvTokenCover[collateralType][safeHandler] >= yvTokenAmount, "YearnCoinSafeSaviour/withdraw-request-higher-than-balance");
 
         // Redeem system coins from Compound and transfer them to the caller
-        uint256 currentSystemCoinAmount = systemCoin.balanceOf(address(this));
         yvTokenCover[collateralType][safeHandler] = sub(yvTokenCover[collateralType][safeHandler], yvTokenAmount);
-        require(yVault.withdraw(yvTokenAmount) == 0, "YearnCoinSafeSaviour/cannot-redeem-ctoken");
 
-        uint256 amountTransferred = sub(systemCoin.balanceOf(address(this)), currentSystemCoinAmount);
-        systemCoin.transfer(dst, amountTransferred);
+        uint256 withdrawnAmount = yVault.withdraw(yvTokenAmount); // use return value to save on math operations
+        require(withdrawnAmount > 0, "YearnCoinSafeSaviour/no-coins-withdrawn");
+        systemCoin.transfer(dst, withdrawnAmount);
 
         emit Withdraw(
           msg.sender,
           collateralType,
           safeHandler,
           dst,
-          amountTransferred,
+          withdrawnAmount,
           cTokenAmount
         );
 
@@ -309,7 +307,8 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
 
         // Check that there are enough yvTokens added to cover both the keeper's payout and the amount used to save the SAFE
         uint256 keeperYTokenPayout = div(mul(keeperPayout, WAD), yVault.pricePerShare());
-        require(yvTokenCover[collateralType][safeHandler] >= add(keeperYTokenPayout, tokenAmountUsed), "YearnCoinSafeSaviour/not-enough-cover-deposited");
+        uint256 amountToWithdraw = add(keeperYTokenPayout, tokenAmountUsed);
+        require(yvTokenCover[collateralType][safeHandler] >= amountToWithdraw, "YearnCoinSafeSaviour/not-enough-cover-deposited");
 
         // Update the remaining cover
         yvTokenCover[collateralType][safeHandler] = sub(yvTokenCover[collateralType][safeHandler], add(keeperYTokenPayout, tokenAmountUsed));
@@ -318,9 +317,9 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
         saviourRegistry.markSave(collateralType, safeHandler);
 
         // Get system coins back from Yearn Vault
-        uint256 currentSystemCoinAmount = systemCoin.balanceOf(address(this));
-        require(yVault.withdraw(add(keeperYTokenPayout, tokenAmountUsed)) == 0, "YearnCoinSafeSaviour/cannot-redeem-ctoken");
-        uint256 systemCoinsToRepay = sub(sub(systemCoin.balanceOf(address(this)), currentSystemCoinAmount), keeperPayout);
+        uint256 withdrawnAmount = yVault.withdraw(amountToWithdraw);
+        require(withdrawnAmount > 0, "YearnCoinSafeSaviour/withdraw-request-higher-than-balance");
+        uint256 systemCoinsToRepay = sub(withdrawnAmount, keeperPayout);
 
         // Approve the coin join contract to take system coins and repay debt
         systemCoin.approve(address(coinJoin), 0);
