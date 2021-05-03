@@ -245,7 +245,7 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
         require(yvTokens > 0, "YearnCoinSafeSaviour/no-vault-tokens-returned");
 
         // Update the cToken balance used to cover the SAFE
-        yvTokenCover[collateralType][safeHandler] = yvTokens;
+        yvTokenCover[collateralType][safeHandler] += yvTokens;
 
         emit Deposit(msg.sender, collateralType, safeHandler, systemCoinAmount, yvTokens);
     }
