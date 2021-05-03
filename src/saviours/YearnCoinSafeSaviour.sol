@@ -104,7 +104,7 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
       bytes32 collateralType,
       address indexed safeHandler,
       uint256 systemCoinAmount,
-      uint256 cTokenAmount
+      uint256 yvTokenAmount
     );
     event Withdraw(
       address indexed caller,
@@ -112,7 +112,7 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
       address indexed safeHandler,
       address dst,
       uint256 systemCoinAmount,
-      uint256 cTokenAmount
+      uint256 yvTokenAmount
     );
 
     constructor(
@@ -123,7 +123,7 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
       address oracleRelayer_,
       address safeManager_,
       address saviourRegistry_,
-      address cToken_,
+      address yVault_,
       uint256 keeperPayout_,
       uint256 minKeeperPayoutValue_
 
@@ -277,8 +277,9 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
           safeHandler,
           dst,
           withdrawnAmount,
-          cTokenAmount
+          yvTokenAmount
         );
+      }
 
     // --- Saving Logic ---
     /*
