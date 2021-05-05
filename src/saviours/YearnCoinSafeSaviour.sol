@@ -160,7 +160,7 @@ contract YearnCoinSafeSaviour is SafeMath, SafeSaviourLike {
         systemCoinOrcl.getResultWithValidity();
         oracleRelayer.redemptionPrice();
 
-        require(yVault.isYVault(), "YearnCoinSafeSaviour/not-y-vault");
+        //require(yVault.isYVault(), "YearnCoinSafeSaviour/not-y-vault");
         require(address(safeEngine) != address(0), "YearnCoinSafeSaviour/null-safe-engine");
         require(address(systemCoin) != address(0), "YearnCoinSafeSaviour/null-sys-coin");
 
